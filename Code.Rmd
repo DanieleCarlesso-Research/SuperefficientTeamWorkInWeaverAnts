@@ -1,0 +1,739 @@
+---
+title: "Superefficient teamwork in weaver ants"
+author: "Code by: Daniele Carlesso and Madelyne Stewardson"
+date: "2025-07-01"
+output: 
+  html_document: 
+    fig_width: 10
+    fig_height: 10
+    toc: true
+---
+
+# . Set working directory. Load packages. Set theme for figures
+
+```{r,error=FALSE}
+
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path)) ## Data must be in same folder
+
+if (!require(librarian)) {
+  install.packages("librarian")
+  library(librarian)
+}
+
+shelf(tidyverse, ggplot2, ggpmisc, viridis, ggpubr, lme4, lmerTest, DHARMa, sjPlot, glmmTMB, effects, ggeffects, AICcmodavg, modelsummary, emmeans, data.table, MuMIn, Durga, car, truncnorm, random, performance, png, grid, loo, bayesplot, brms, png, grid, gtools, ggnewscale)
+
+set_theme(base = theme_bw(),
+          axis.title.size = 1.5,
+          axis.textsize = 1.0, axis.title.color = 'black', axis.textcolor = 'black',
+          legend.title.size = 1.5)
+
+```
+
+# . Load datasets
+
+df = dataset on chain size and force
+allchainposdf = ant posture dataset
+thoraxDF = thorax length dataset
+
+```{r}
+
+df <- read.csv("ChainData.csv") 
+allchainposdf <- read.csv("ChainPos.csv") 
+thoraxDF <- read.csv("ThoraxLengths.csv")
+
+```
+
+# . Summarise dataset by arrangement and calculate chain length ratio
+
+Arrangement changes every time an ant joins or leaves the pulling effort. Note that 'Chain length ratio' is named 'propmax' throughout the code.
+
+```{r}
+
+meandf <- df %>%
+  group_by(replicate, newarr) %>%
+  mutate(n_row = n()) %>% ## Duration of arrangement in seconds
+  mutate(
+    state = ifelse(ptime < 0, 'grow', 'decay'),
+    meanforceN = mean(forceN),
+    meanforceperantN = mean(forceperantN)) %>%
+  slice_head() %>%
+  mutate(
+    prop1 = chain1*1/total.ants,
+    prop2 = chain2*2/total.ants,
+    prop3 = chain3*3/total.ants,
+    prop4 = chain4*4/total.ants,
+    prop5 = chain5*5/total.ants,
+  ) %>%
+  mutate(
+    propmax = as.factor(which.max(c(prop1, prop2, prop3, prop4, prop5))), ## chain length ratio
+    state = factor(state, levels = c("grow","decay"))
+  )
+
+```
+
+### . Summary of experimental observations
+
+```{r}
+
+length(unique(meandf$replicate)) ## 15 reps
+length(unique(meandf$arrangement)) ## 108 arrangements
+length(unique(meandf$colony)) ## 5 colonies
+n <- meandf %>% group_by(replicate) %>% summarise(n = length(unique(newarr))); sum(n$n) ## 364 new arrivals
+nrow(meandf) ## 364 observations in total
+
+```
+
+### . Average force produced by ants
+
+```{r}
+
+avg_forceperant <- mean(meandf$meanforceperantN) ## Average individual force output throughout all replicates
+
+sem_forceperant <- sd(meandf$meanforceperantN)/sqrt(length(meandf$meanforceperantN)) ## Standard deviation
+
+max_forceperant <- max(meandf$meanforceperantN) ## Maximum individual force output recorded
+
+mean(meandf[meandf$total.ants == 1,]$meanforceperantN) ## Mean individual force output when team size == 1
+
+mean(meandf[meandf$total.ants == 15,]$meanforceperantN) ## Mean individual force output when team size == 15
+
+```
+
+
+# . Data analysis and visualization
+
+## . GLMM on team force output
+
+```{r}
+
+# Fit model
+fit1 <- glmmTMB(sqrt(meanforceN) ~ total.ants * state + propmax + (1|colony/replicate), data = meandf) 
+
+# Diagnostics
+check_model(fit1)
+
+# Results
+summary(fit1)
+
+Anova(fit1, "III")
+
+# Forest plot
+plot_model(fit1)
+
+## Pairwise comparison between chain length ratio 
+emms <- emmeans(fit1, ~ propmax)
+pairs(emms)
+
+### PLOTTING ###
+
+## Predict based on total number of ants and state
+dat <- ggpredict(fit1, terms = c("total.ants [all]", "state [all]")) %>%
+  rename(state = group)
+
+## Visualise results 
+FigX1 <- ggplot() +
+  geom_point(data = meandf, aes(total.ants, meanforceN, color = state, fill = state), size = 3) +
+  geom_line(data = dat, aes(x, predicted, color = state)) +
+  geom_ribbon(data = dat, aes(x = x, ymin = conf.low, ymax = conf.high, fill = state), alpha = .4) +
+  labs(
+    x = "Total nº of ants",
+    y = "Total Force (mN)",
+    fill = "Phase",
+    colour = "Phase") +
+  scale_color_manual(values = c("#00BFC4", "#F8766D"), labels = c("Growth", "Decay")) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D"), labels = c("Growth", "Decay")) +
+  theme_pubr(legend = c(0.1, 0.9),
+             base_size = 13); FigX1
+
+
+## Effect without transformation
+dat1 <- ggeffect(fit1, terms = c("total.ants [all]")) %>%
+  rename(state = group) 
+
+ggplot(meandf) +
+  geom_point(aes(total.ants, sqrt(meanforceN), color = state)) +
+  geom_line(data = dat1, aes(x, predicted)) +
+  geom_ribbon(data = dat1, aes(x = x, ymin = conf.low, ymax = conf.high), alpha = .2) +
+  labs(
+    x = "Total nº of ants",
+    y = "Square-root Mean Force (mN)"
+  )
+
+## Durga plot
+d <- Durga::DurgaDiff(meandf, "meanforceN", "propmax")
+DurgaPlot(d, contrasts = c("2 - 1", "3 - 2", "4 - 3"), xlab = "PropMax",left.ylab = "Mean force (mN)") 
+
+```
+
+## . GLMM on individual force output
+
+```{r}
+
+# Fit model
+fit2 <- glmmTMB(sqrt(meanforceperantN) ~ total.ants * state + propmax + (1|colony/replicate), data = meandf) 
+
+# Diagnostics
+check_model(fit2)
+
+# Results
+summary(fit2)
+Anova(fit2, "III")
+
+# Forest plot
+plot_model(fit2)
+
+# Pairwise comparison between chain length ratio 
+emms.ifo <- emmeans(fit2, ~ propmax)
+pairs(emms.ifo)
+
+
+### PLOTTING ###
+dat2 <- ggpredict(fit2, terms = c("total.ants [all]", "state [all]")) %>%
+  rename(state = group)
+
+## Effect of total number of ants and state
+FigX2 <- ggplot() +
+  geom_jitter(data = meandf, aes(total.ants, meanforceperantN, color = state), height = 0, width = 0) +
+  scale_x_continuous(breaks = c(1, 5, 10, 15)) +
+  geom_line(data = dat2, aes(x, predicted, color = state)) +
+  geom_ribbon(data = dat2, aes(x = x, ymin = conf.low, ymax = conf.high, fill = state), alpha = .2) +
+  labs(
+    x = "Total nº of ants",
+    y = "Mean Force per ant (mN)",
+    colour = "Phase",
+    fill = "Phase"
+  ) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D"), labels = c("Growth", "Decay")) +
+  scale_fill_manual(values = c("#00BFC4", "#F8766D"), labels = c("Growth", "Decay")) +
+  theme_pubr(legend = c(0.1, 0.9), base_size = 13) ; FigX2
+
+# Durga plot
+d1 <- Durga::DurgaDiff(meandf, "meanforceperantN", "propmax")
+p <- Durga::DurgaPlot(d1, contrasts = c("1 - 2", "2 - 1", "3 - 1", "4 - 1"), xlab = "", left.ylab = "Mean Force per ant (mN)", error.bars.type = "CI")
+
+```
+
+## . Joining and leaving dynamics 
+
+Here we plot the joining and leaving dynamics for each replicate. Time is standardized so that each replicate starts at -1 and finishes at 1, where -1 to 0 indicates the growth phase, and 0 to 1 indicates the decay phase.
+
+```{r}
+
+df1 <- df %>%
+  group_by(replicate) %>%
+  arrange(replicate, ptime) %>%
+  mutate(
+    changeNants = total.ants - lag(total.ants, 1) ## Find instances where number of ants changes
+  )
+
+df1$joinLeave <- ifelse(  ## Label each event as joining or leaving
+  df1$changeNants == 1, "Join",
+  ifelse(df1$changeNants == -1, "Leave", NA) 
+)
+
+df1$timeJoinLeave <- ifelse(
+  !is.na(df1$joinLeave), df1$ptime, NA
+)
+
+JL_plot <- ggplot(df1, aes(ptime, forceN)) +
+  geom_path() +
+  geom_vline(data = df1[!is.na(df1$joinLeave),], aes(xintercept = timeJoinLeave, color = joinLeave), linetype = 2, na.rm = T) +
+  facet_wrap(~replicate)
+
+plotly::ggplotly(JL_plot) ## Interactive plot
+
+```
+
+## . Force change after joining or leaving event
+
+Force change is evaluated over the 5 seconds following a joining or leaving event
+
+```{r}
+
+timerange = 5 ## time of interest before/after each joining / leaving event 
+
+df1 <- df1 %>%
+  group_by(replicate, newarr) %>%
+  mutate(
+    duration = n()
+  )
+
+JL_events <- df1[!is.na(df1$joinLeave), ]
+
+JL_forcechange = list()
+for (row in 1:nrow(JL_events)) {
+
+  event <- JL_events[row, ] 
+  
+  if (any(!is.na(df1[df1$replicate == event$replicate & 
+                     between(df1$time, event$time - timerange, event$time - 1),]$joinLeave)) |
+      any(!is.na(df1[df1$replicate == event$replicate & 
+                     between(df1$time, event$time + 1, event$time + timerange),]$joinLeave)) |
+      length(df1[df1$replicate == event$replicate & 
+                     between(df1$time, event$time - timerange, event$time - 1),]$joinLeave) != timerange |
+      length(df1[df1$replicate == event$replicate & 
+                     between(df1$time, event$time + 1, event$time + timerange),]$joinLeave) != timerange) {
+    next
+    }
+  
+  force_pre <- mean(df1[df1$replicate == event$replicate & 
+                     between(df1$time, event$time - timerange, event$time),]$forceN) 
+  
+  force_post <- (df1[df1$replicate == event$replicate & 
+                     between(df1$time, event$time + 1, event$time + timerange),]$forceN)
+  
+  force_post <- force_post - force_pre[1]
+  force_pre <- force_pre - force_pre[1]
+  
+  force <- c(force_pre, force_post)
+  
+  ants = event$total.ants
+  ants = ifelse(between(ants, 1, 5), "1 - 5", ifelse(between(ants, 5, 10), "6 - 10", "10 +"))
+  
+  JL_forcechange[[length(JL_forcechange) + 1]] <- data.frame(
+    replicate = rep(event$replicate[1], times = length(force_pre)),
+    event = rep(event$joinLeave, times = length(force_pre)),
+    ID = row,
+    ants = ants,
+    phase = rep(ifelse(event$ptime < 0, "Growth", "Decay"), times = length(force_pre)),
+    force = force,
+    time = seq(force) - 1
+  )
+}
+
+JL_forcechange <- rbindlist(JL_forcechange)
+
+JL_forcechange$phase <- factor(JL_forcechange$phase, levels = c("Growth", "Decay"))
+JL_forcechange$ants <- factor(JL_forcechange$ants, levels = c("1 - 5", "6 - 10", "10 +"))
+
+JL_forcechange_summ <- JL_forcechange %>%
+  group_by(phase, event, time) %>%
+  summarise(
+    event = event[1],
+    phase = phase[1],
+    force_min = min(force),
+    force_max = max(force),
+    force_mean = mean(force),
+    n = n(),
+    SEM = sd(force)/sqrt(n()),
+    sem_min = force_mean - SEM, 
+    sem_max = force_mean + SEM,
+    s = sd(force),
+    margin = quantile(x = force, probs = 0.975)*sd(force)/sqrt(n()),
+    ci_min = force_mean - margin, 
+    ci_max = force_mean + margin
+  )
+
+ForceTeam_JoinLeave <- ggplot(JL_forcechange_summ, aes(time, force_mean, fill = event)) + 
+  geom_ribbon(aes(ymin = sem_min, ymax = sem_max), alpha = .4) + 
+  geom_line(aes(color = event)) +
+  geom_point(aes(color = event)) +
+  scale_fill_viridis_d(option = "H", 
+                       begin = 0.1, 
+                       aesthetics = c('color', 'fill')) +
+  labs(
+    fill = "Event",
+    color = "Event",
+    x = "Time from event (s)",
+    y = "Team force (mN)"
+  ) +
+  theme(
+    legend.position = c(0.9, 0.85),
+    legend.title = element_text(face = "plain")
+  ) +
+  facet_wrap(~phase); ForceTeam_JoinLeave
+
+```
+
+## . Figure 2 - Main manuscript
+
+```{r}
+
+## Note: Durga plots do not integrate well with ggplot and ggarrange. I save it as PNG and re-upload it to combine it with other plots.
+
+# Create temp file
+tmp_file <- tempfile(fileext = ".png")
+
+# Open a PNG device and draw the Durga plot
+png(filename = tmp_file, width = 1800, height = 1300, res = 300)
+Durga::DurgaPlot(d1, contrasts = c("1 - 2" = "1 - 2", "2 - 1" = "2 - 1", "3 - 1" = "3 - 1", "4 - 1" = "4 - 1"), xlab = "", left.ylab = "Mean Force per ant (mN)", error.bars.type = "CI")
+dev.off()
+
+# Read the image and convert to grob
+img <- readPNG(tmp_file)
+p1 <- rasterGrob(img, interpolate = TRUE, 
+                 width = unit(1, "npc"), height = unit(1.1, "npc"))
+
+pplots <- list(FigX1, p1, FigX2, ForceTeam_JoinLeave)
+
+# Combine plots
+ggarrange(plotlist = pplots, nrow = 2, ncol = 2, labels = c("A", "C", "B", "D"))
+
+```
+
+## . Bayesian model for force change following join/leave event
+
+```{r}
+
+# Convert variables into factors
+JL_forcechange$timeF <- as.factor(JL_forcechange$time)
+JL_forcechange$ID <- as.factor(JL_forcechange$ID)
+JL_forcechange$event <- as.factor(JL_forcechange$event)
+
+JL_df <- JL_forcechange[JL_forcechange$time == 5, ]
+
+# Data show extreme leptokurtosis and unimodal peak
+ggplot(JL_df, aes(force)) + 
+  geom_histogram() + 
+  xlab("X")
+
+# BRMS model
+JL_df$force_z <- (JL_df$force - mean(JL_df$force))/sd(JL_df$force) # Centering and scaling
+
+# Set robust prior
+prior <- c(
+  prior(student_t(3, 0, 10), class = "b"),  # fixed effects
+  prior(gamma(2, 0.5), class = "nu")        # favors moderate tail thickness
+)
+
+# Model fit
+model_brm <- brm(
+  force_z ~ phase * event + (1 | replicate),
+  data = JL_df,
+  family = student(),
+  prior = prior,
+  iter = 4000, warmup = 1000, chains = 4, cores = 4,
+  control = list(adapt_delta = 0.99)
+)
+
+# Model diagnostics
+pp <- pp_check(model_brm, type = "dens_overlay")
+pp + xlim(-20, 20)
+
+pp_check(model_brm, type = "ecdf_overlay")         # Tails or peaks
+pp_check(model_brm, type = "intervals")            # Predictive intervals per point
+pp_check(model_brm, type = "stat", stat = "mad")   # Median absolute deviation
+
+posterior_summary(model_brm, variable = "nu") # Estimated degrees of freedom
+mcmc_areas(as_draws_df(model_brm), pars = "nu") # Nu estimation looks robust for heavy tails
+
+loo(model_brm)   # Pareto k diagnostics
+
+### Results ###  
+summary(model_brm)
+
+## Hypothesis testing 
+
+# Do joining events cause more force increase in the growth phase than in the decay phase?
+hypothesis(model_brm, "phaseDecay < 0")
+
+# Do leaving events cause more force decrease during decay phase than growth phase?
+hypothesis(model_brm, "phaseDecay + phaseDecay:eventLeave < 0")
+
+# Does force increase for joining events during the decay phase?
+hypothesis(model_brm, "Intercept + phaseDecay > 0")
+
+# Do leave events differ from 0 in the growth phase?
+hypothesis(model_brm, "Intercept + eventLeave < 0")
+
+# Do leave events differ from 0 in the decay phase?
+hypothesis(model_brm, "Intercept + phaseDecay + eventLeave + phaseDecay:eventLeave < 0")
+
+```
+
+## . Ant posture analysis
+
+Visualize hindleg stretch based on ant position within the chain
+
+```{r}
+
+allchainposdf$ant <- factor(allchainposdf$ant, levels = c('oneone','twoone','twotwo','threeone','threetwo','threethree'))
+
+## Rename for ease of visualization
+allchainposdf$nameplot <- ifelse(allchainposdf$ant == 'oneone', "Singletons", NA)
+allchainposdf$nameplot <- ifelse(allchainposdf$ant == 'twoone', "2-ant-chain (front)", allchainposdf$nameplot)
+allchainposdf$nameplot <- ifelse(allchainposdf$ant == 'twotwo', "2-ant-chain (back)", allchainposdf$nameplot)
+allchainposdf$nameplot <- ifelse(allchainposdf$ant == 'threeone', "3-ant-chain (front)", allchainposdf$nameplot)
+allchainposdf$nameplot <- ifelse(allchainposdf$ant == 'threetwo', "3-ant-chain (middle)", allchainposdf$nameplot)
+allchainposdf$nameplot <- ifelse(allchainposdf$ant == 'threethree', "3-ant-chain (back)", allchainposdf$nameplot)
+
+heat_df <- allchainposdf %>%
+  group_by(chainsize, nameplot) %>%
+  summarise(
+    sd_stretch = sd(meanhindstretch, na.rm = TRUE), ## SD of hindleg stretch
+    meanhindstretch = mean(meanhindstretch, na.rm = TRUE)) %>%  ## mean hindleg stretch
+  ungroup()
+
+## Rearrange levels for plotting
+heat_df$nameplot <- factor(heat_df$nameplot, levels = c(
+  "Singletons",
+  "2-ant-chain (front)", "2-ant-chain (back)",
+  "3-ant-chain (front)", "3-ant-chain (middle)", "3-ant-chain (back)"
+))
+
+heat_df <- heat_df[order(heat_df$chainsize, heat_df$nameplot), ] 
+
+# Add x/y positions to draw each ant in a spatial layout
+heat_df$y <- as.numeric(as.factor(heat_df$chainsize))
+heat_df$x <- ave(rep(1, nrow(heat_df)), heat_df$y, FUN = seq_along)
+
+hindstretch_plot <- ggplot(heat_df, aes(x = x, y = -y)) +  # Flip y for top-down chain order
+  geom_tile(aes(fill = meanhindstretch), width = 0.9, height = 0.9, alpha = 0.7) +
+  geom_text(aes(label = paste0(round(meanhindstretch, 2), "\n± ", round(sd_stretch, 2))),
+            size = 3.5, color = "black") +
+  scale_fill_viridis(option = "B", name = "Extension (mm)", begin = 0.1) +
+  scale_y_continuous(breaks = -unique(heat_df$y),
+                     labels = paste0(unique(heat_df$chainsize), "-ant chain")) +
+  theme(
+    legend.position = c(0.7, 0.90),
+    legend.title.position = "top",
+    legend.direction = "horizontal",
+    legend.key.width = unit(1.5, "cm"),      # widen color bar
+    legend.key.height = unit(0.4, "cm"),     # adjust height
+    legend.text = element_text(margin = margin(t = 5, b = 2)),  # space above/below labels
+    legend.spacing.x = unit(0.5, "cm"),      # space between ticks
+    legend.box.margin = margin(t = 5, r = 10, b = 5, l = 10),  # space around legend box
+    plot.title = element_text(hjust = 0.5),
+    axis.title.x = element_blank(),
+    axis.title = element_blank(),
+    text = element_text(size = 15)
+  ) +
+  scale_x_continuous(
+    breaks = sort(unique(heat_df$x)),
+    labels = c("Front", "Middle", "Rear")
+  ) 
+
+hindstretch_plot
+
+```
+
+## . Figure 3 - Main manuscript
+
+```{r}
+
+img <- readPNG("Images/ants.png")
+
+g_img <- rasterGrob(img, interpolate = TRUE)
+
+image_plot <- ggplot() + 
+  annotation_custom(g_img, xmin = -Inf, xmax = Inf, ymin = -Inf, ymax = Inf) +
+  theme_void(); image_plot
+
+ggarrange(image_plot, hindstretch_plot, ncol = 2, widths = c(0.8, 1), labels = c("A", "B"))
+
+```
+
+## . Force of chains v. solo+chains
+
+```{r}
+
+SoloVSoloChains_df <- meandf %>%
+  group_by(replicate) %>%
+  arrange(replicate, ptime) %>%
+  mutate(
+    phase = ifelse(ptime < 0, "Growth", "Decay")
+  )
+
+## Labelling
+SoloVSoloChains_df$solos <- ifelse(  
+  SoloVSoloChains_df$total.chains == 1, "Solos", 
+  ifelse(SoloVSoloChains_df$chain1 > 0 & SoloVSoloChains_df$total.chains > SoloVSoloChains_df$chain1, "Solo + Chain", "Only chains"))
+
+SoloVSoloChains_df$phase <- factor(SoloVSoloChains_df$phase, levels = c('Growth', 'Decay'))
+
+SoloVSoloChains_df$solos <- factor(SoloVSoloChains_df$solos, levels = c("Solos", "Solo + Chain", "Only chains"))
+
+SoloVSoloChains_df <- SoloVSoloChains_df[SoloVSoloChains_df$solos != "Solos",]
+
+## Statistics
+
+# Fit model
+chainComb_mod <- glmmTMB(forceperantN ~ solos + total.ants + (1|replicate), SoloVSoloChains_df)
+
+# Diagnostics
+check_model(chainComb_mod) # Using performance
+
+res <- simulateResiduals(chainComb_mod) # Using DHARMa
+testResiduals(res)
+
+# Results
+summary(chainComb_mod)
+
+## PLOTTING ## 
+plot_model(chainComb_mod, "est") # Forest plot
+ 
+SoloVSoloChains_plt <- ggplot(SoloVSoloChains_df[SoloVSoloChains_df$solos != "Solos",], aes(total.ants, forceperantN, color = solos)) + 
+  geom_point(size = 3, alpha = 1) +
+  facet_wrap(~phase) +
+  labs(
+    x = "Total number of ants",
+    y = "Force per ant (mN)",
+    color = "Arrangement"
+  ) + 
+  theme(
+    text = element_text(size = 13),
+    legend.position = "top"
+  )
+
+SoloVSoloChains_plt
+
+```
+
+## . Number of ants over time, with Joining and Leaving events
+
+```{r}
+
+## Use joining/leaving dataset
+df2 <- df1 %>% 
+  group_by(replicate) %>%
+  arrange(replicate, ptime) 
+
+df2$solos <- ifelse(  
+  df2$total.ants == 1, "1", ifelse(between(df1$total.ants, 2, 5), "2 - 5", 
+                                       ifelse(between(df2$total.ants, 6, 10), "6 - 10", 
+                                              ifelse(between(df2$total.ants, 11, 13), "11 - 13", "13+"))))
+
+## Order factor variable for plotting
+df2$solos <- factor(df2$solos, levels = c("1", "2 - 5", "6 - 10", "11 - 13", "13+"))
+
+# Preserve original names
+unique_reps <- gtools::mixedsort(unique(df2$replicate)) 
+
+df2 <- df2 %>%
+  mutate(replicate = paste0("Replicate ", match(replicate, unique_reps)))
+
+df2$replicate <- factor(df2$replicate, levels = unique(df2$replicate))
+
+y_line <- min(df2$forceN, na.rm = TRUE) - 8
+df_line <- data.frame(x = -1, xend = 1, y = y_line, yend = y_line)
+
+# Plot
+JL_time_plot <- ggplot() +
+  geom_path(data = df2, aes(ptime, forceN, color = solos, group = replicate), linewidth = 0.8) +
+  scale_color_brewer(palette = "Set1", name = "Nº of \nants") +
+  
+  new_scale_color() +
+  
+  geom_point(
+    data = df2[!is.na(df2$joinLeave),],
+    aes(x = ptime, y = -8, color = joinLeave),
+    shape = "triangle",
+    alpha = 0.7,
+    size = 1.8
+  ) +
+  
+  scale_color_manual(values = c("Join" = "black", "Leave" = "red"), name = "Event") +
+
+  labs(x = "Normalised time", 
+       y = "Team force (mN)", 
+       color = "Event",
+       shape = "Event") +
+  
+  ylim(-8, 135) +
+  theme(text = element_text(size = 15)) +
+  facet_wrap(~replicate)
+
+JL_time_plot
+
+```
+
+## . Force change between start and end of each arrangement
+
+Density plot shows that, for each arrangement, force per ant increases during growth and decreases during decay. Only 
+
+```{r}
+
+df_forcechange_arrangement <- df %>%
+  group_by(replicate, newarr) %>%
+  mutate(
+    duration = n(),
+    timeFirst = mean(head(forceperantN), 3), ## Average force in the first 3 seconds of arrangement
+    timeLast = mean(tail(forceperantN, 3)), ## Average force in the last 3 seconds of arrangement
+    forcediff = timeLast - timeFirst,
+    phase = ifelse(ptime < 0, "growth", "decay"),
+    phase = factor(phase, levels = c("growth", "decay"))
+  ) %>%
+  slice_head()
+
+force_diff_plot <- ggplot(df_forcechange_arrangement[df_forcechange_arrangement$duration > 10, ], aes(x = forcediff, color = phase)) +
+  geom_density(linewidth = 1, key_glyph = draw_key_path) +
+  labs(
+    x = "Difference in force per ant between start and end of each arrangement (mN)",
+    color = "Phase"
+  ) +
+  geom_vline(aes(xintercept = 0), linetype = 2, color = "black", linewidth = 0.5) +
+  scale_color_manual(values = c("#00BFC4", "#F8766D"), labels = c("Growth", "Decay")) +
+  theme_pubr(legend = c(0.1, 0.9),
+             base_size = 13) +
+  theme(strip.text = element_blank())
+
+force_diff_plot
+
+```
+
+## Thorax length v. force production
+
+```{r}
+
+# Avoid name conflict
+meandf <- meandf %>% select(-colony)
+
+# Rename colonies
+meandf$colony_short <- ifelse(startsWith(meandf$replicate, "Col"), substr(meandf$replicate, 1, 4), substr(meandf$replicate, 1, 5))
+
+thoraxDF$colony_short <- str_remove(unique(thoraxDF$colony), "Thorax")
+
+# Select relevant columns
+thoraxDF <- thoraxDF[, c('colony_short', 'Length')]
+
+thoraxDF <- thoraxDF[thoraxDF$colony_short %in% unique(meandf$colony_short), ]
+
+# Thorax length is similar across colonies
+ggplot(thoraxDF, aes(colony_short, Length, fill = colony_short)) +
+  geom_boxplot()
+
+# Merge datasets
+thoraxDF <- thoraxDF %>%
+  group_by(colony_short) %>%
+  summarise(thorax_length = mean(Length))
+
+meandf_wThorax <- merge(meandf, thoraxDF, by = "colony_short")
+
+map = setNames(c("Colony 1", "Colony 2", "Colony 3", "Colony 4", "Colony 5"), c(unique(meandf_wThorax$colony_short)))
+
+meandf_wThorax <- meandf_wThorax %>%
+  mutate(colony_short = map[colony_short])
+
+
+## PLOTTING ##
+ggplot(meandf_wThorax, aes(thorax_length, meanforceperantN)) +
+  geom_point(aes(color = colony_short)) +
+  geom_smooth(method = "lm") +
+  labs(
+    color = "Colony", 
+    y = "Mean force per ant (mN)",
+    x = "Thorax length (cm)"
+  )
+
+ggplot(meandf_wThorax, aes(thorax_length, chainsize)) +
+  geom_point(aes(color = colony_short)) +
+  geom_smooth(method = "lm") +
+  labs(
+    color = "Colony", 
+    y = "Chain size (ants)",
+    x = "Thorax length (cm)"
+  )
+
+
+## STATISTICS ##
+mod_thorax <- glmmTMB(meanforceperantN ~ thorax_length, meandf_wThorax)
+
+# Diagnostics
+res <- simulateResiduals(mod_thorax, n = 1000)
+testResiduals(res)
+
+# Results
+summary(mod_thorax)
+
+```
+
