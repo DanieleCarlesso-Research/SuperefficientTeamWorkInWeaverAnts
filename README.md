@@ -13,6 +13,7 @@ Datasets:
 ```
 •	ChainData.csv
 •	ChainPos.csv
+•	ThoraxLengths.csv
 ```
 Code:
 ```
@@ -21,4 +22,8 @@ Code:
 Markdown summary:
 ```
 •	Code.html
+```
+Images:
+```
+•	ants.png
 ```
